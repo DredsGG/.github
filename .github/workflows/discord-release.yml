@@ -1,0 +1,141 @@
+name: Discord release
+
+# Reusable workflow: posts a release card (embed + link buttons) to the Dreds Discord.
+# Called from each project's .github/workflows/discord.yml. See README.md.
+on:
+  workflow_call:
+    inputs:
+      nome:
+        description: "Project name shown on the card, e.g. Midas"
+        type: string
+        required: true
+      emoji:
+        description: "Project emoji, e.g. 🦉"
+        type: string
+        required: true
+      cor:
+        description: "Card color as an integer, e.g. 5819394 (0x58CC02)"
+        type: number
+        required: true
+      modo:
+        description: "normal = project channel + feed; teste = only the test channel, with the latest release"
+        type: string
+        required: false
+        default: normal
+      tag:
+        description: "Release tag to announce. Empty = the release from the event, or the latest release"
+        type: string
+        required: false
+        default: ""
+    secrets:
+      webhook_projeto:
+        required: false
+      webhook_feed:
+        required: false
+      webhook_testes:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  card:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Build and send the card
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NOME: ${{ inputs.nome }}
+          EMOJI: ${{ inputs.emoji }}
+          COR: ${{ inputs.cor }}
+          MODO: ${{ inputs.modo }}
+          TAG_INPUT: ${{ inputs.tag }}
+          TAG_EVENTO: ${{ github.event.release.tag_name }}
+          WH_PROJETO: ${{ secrets.webhook_projeto }}
+          WH_FEED: ${{ secrets.webhook_feed }}
+          WH_TESTES: ${{ secrets.webhook_testes }}
+        run: |
+          set -euo pipefail
+                  gh_api() { curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
+
+          # Which release
+          TAG="${TAG_INPUT:-$TAG_EVENTO}"
+          if [ "$MODO" = "teste" ] && [ -z "$TAG_INPUT" ]; then TAG=""; fi
+          if [ -n "$TAG" ]; then
+            gh_api "repos/$REPO/releases/tags/$TAG" > release.json
+          else
+            gh_api "repos/$REPO/releases?per_page=1" | jq '.[0]' > release.json
+          fi
+          if [ "$(jq -r 'type' release.json)" != "object" ]; then echo "::error::No release found in $REPO"; exit 1; fi
+          echo "Release: $(jq -r '.tag_name' release.json) (prerelease: $(jq -r '.prerelease' release.json))"
+
+          # Thumbnail: docs/icon.png on main if it exists, else the GitHub avatar
+          ICON="https://raw.githubusercontent.com/$REPO/main/docs/icon.png"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -I "$ICON" || true)
+          [ "$code" = "200" ] || ICON="https://github.com/DredsGG.png"
+
+          jq -n --slurpfile r release.json \
+            --arg nome "$NOME" --arg emoji "$EMOJI" --argjson cor "$COR" \
+            --arg repo "$REPO" --arg icon "$ICON" '
+            ($r[0]) as $rel
+            | ($rel.body // "" | gsub("\r"; "")) as $b0
+            | (if ($b0 | length) > 1500 then ($b0[0:1500] + "…") else $b0 end) as $b1
+            | (if ($b1 | gsub("\\s"; "") == "") then "Versão nova disponível." else $b1 end) as $b2
+            | (($rel.name // "") | test("URGENTE"; "i")) as $urg
+            | {
+                allowed_mentions: {parse: []},
+                embeds: [{
+                  title: ("\($emoji) \($nome) \($rel.tag_name)")[0:256],
+                  url: $rel.html_url,
+                  description: (if $urg then "⚠️ **Atualização urgente** — atualize assim que puder.\n\n" + $b2 else $b2 end),
+                  color: (if $urg then 15026253 else $cor end),
+                  thumbnail: {url: $icon},
+                  fields: (if $rel.prerelease then [{name: "Tipo", value: "pré-lançamento", inline: true}] else [] end),
+                  footer: {text: "\($repo) · feito por Dreds"},
+                  timestamp: ($rel.published_at // $rel.created_at)
+                }],
+                components: [{type: 1, components: [
+                  {type: 2, style: 5, label: "Ver release", url: $rel.html_url},
+                  {type: 2, style: 5, label: "Todas as versões", url: "https://github.com/\($repo)/releases"}
+                ]}]
+              }' > payload.json
+          jq 'del(.components)' payload.json > payload-sem-botoes.json
+
+          # POST to a webhook without ever printing its URL (URL goes to curl through stdin).
+          post() {
+            local hook="$1" query="$2" file="$3" code
+            for i in 1 2 3 4 5; do
+              code=$(printf 'url = "%s?wait=true%s"\n' "$hook" "$query" \
+                | curl -sS -K - -o resp.json -w '%{http_code}' -H 'Content-Type: application/json' -X POST --data @"$file" || true)
+              if [ "$code" = "429" ]; then
+                sleep "$(jq -r '.retry_after // 2' resp.json 2>/dev/null || echo 2)"; continue
+              fi
+              echo "$code"; return 0
+            done
+            echo "$code"
+          }
+          send() {
+            local label="$1" hook="$2" code
+            if [ -z "$hook" ]; then echo "::error::Secret for $label is empty"; return 1; fi
+            code=$(post "$hook" "&with_components=true" payload.json)
+            if [ "${code:0:1}" = "4" ]; then
+              echo "$label: $code with buttons ($(jq -r '.message // empty' resp.json 2>/dev/null)), sending without them"
+              code=$(post "$hook" "" payload-sem-botoes.json)
+            fi
+            if [ "${code:0:1}" = "2" ]; then
+              echo "$label: sent (message $(jq -r '.id' resp.json))"
+            else
+              echo "::error::$label: HTTP $code $(jq -r '.message // empty' resp.json 2>/dev/null)"; return 1
+            fi
+          }
+
+          rc=0
+          if [ "$MODO" = "teste" ]; then
+            send "testes" "$WH_TESTES" || rc=1
+          else
+            send "projeto" "$WH_PROJETO" || rc=1
+            send "feed" "$WH_FEED" || rc=1
+          fi
+          exit $rc

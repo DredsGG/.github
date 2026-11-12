@@ -1,0 +1,74 @@
+name: Textos do INÍCIO
+
+# Posts (or edits) the fixed texts of the INÍCIO channels from inicio/*.md.
+#   destino = teste  → posts the three texts to the test channel only (nothing is saved)
+#   destino = inicio → for each text: if inicio/mensagens.json has its message ID, edits it (PATCH);
+#                      otherwise posts it and prints the new ID (add it to mensagens.json and the README).
+on:
+  workflow_dispatch:
+    inputs:
+      destino:
+        description: "teste (só #testes) ou inicio (canais de verdade)"
+        type: choice
+        options: [teste, inicio]
+        default: teste
+
+permissions:
+  contents: read
+
+jobs:
+  textos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post or edit
+        env:
+          DESTINO: ${{ inputs.destino }}
+          WH_BOASVINDAS: ${{ secrets.DISCORD_WEBHOOK_BOASVINDAS }}
+          WH_COMOFUNCIONA: ${{ secrets.DISCORD_WEBHOOK_COMOFUNCIONA }}
+          WH_LINKS: ${{ secrets.DISCORD_WEBHOOK_LINKS }}
+          WH_TESTES: ${{ secrets.DISCORD_WEBHOOK_TESTES }}
+        run: |
+          set -euo pipefail
+          LOGO="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/assets/logo-dreds.png"
+
+          texto() {  # replaces {{canal}} with <#ID> from inicio/canais.json
+            jq -Rs --slurpfile c inicio/canais.json \
+              'reduce ($c[0] | to_entries[]) as $e (.; gsub("\\{\\{" + $e.key + "\\}\\}"; "<#" + ($e.value | tostring) + ">")) | rtrimstr("\n")' "inicio/$1.md"
+          }
+          call() {  # call METHOD HOOK PATH FILE → prints HTTP code, body in resp.json; URL never printed
+            local code
+            for i in 1 2 3 4 5; do
+              code=$(printf 'url = "%s%s"\n' "$2" "$3" \
+                | curl -sS -K - -o resp.json -w '%{http_code}' -H 'Content-Type: application/json' -X "$1" --data @"$4" || true)
+              if [ "$code" = "429" ]; then sleep "$(jq -r '.retry_after // 2' resp.json 2>/dev/null || echo 2)"; continue; fi
+              break
+            done
+            echo "$code"
+          }
+
+          rc=0
+          for item in "boas-vindas:WH_BOASVINDAS" "como-funciona:WH_COMOFUNCIONA" "links:WH_LINKS"; do
+            nome="${item%%:*}"; var="${item#*:}"
+            texto "$nome" | jq --arg logo "$LOGO" '{allowed_mentions: {parse: []},
+              embeds: [{description: ., color: 8150271, thumbnail: {url: $logo}}]}' > payload.json
+            if [ "$DESTINO" = "teste" ]; then
+              [ -n "$WH_TESTES" ] || { echo "::error::secret DISCORD_WEBHOOK_TESTES is empty"; exit 1; }
+              code=$(call POST "$WH_TESTES" "?wait=true" payload.json)
+              echo "$nome → #testes: HTTP $code"
+            else
+              hook="${!var}"
+              [ -n "$hook" ] || { echo "::error::$nome: secret $var is empty"; rc=1; continue; }
+              id=""; [ -f inicio/mensagens.json ] && id=$(jq -r --arg n "$nome" '.[$n] // empty | tostring' inicio/mensagens.json)
+              if [ -n "$id" ]; then
+                code=$(call PATCH "$hook" "/messages/$id" payload.json)
+                echo "$nome: edited message $id (HTTP $code)"
+              else
+                code=$(call POST "$hook" "?wait=true" payload.json)
+                echo "$nome: posted message $(jq -r '.id // "?"' resp.json) (HTTP $code)"
+              fi
+            fi
+            [ "${code:0:1}" = "2" ] || { echo "::error::$nome: HTTP $code $(jq -r '.message // empty' resp.json)"; rc=1; }
+          done
+          exit $rc
