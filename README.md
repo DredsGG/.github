@@ -66,9 +66,9 @@ channel mentions (IDs in `inicio/canais.json`).
 
 | Channel | Channel ID | Message ID |
 |---|---|---|
-| 👋・boas-vindas | 1570481406411407390 | — |
-| 📖・como-funciona | 1570481407527227404 | — |
-| 🔗・links | 1570481409368395907 | — |
+| 👋・boas-vindas | 1570481406411407390 | 1570483251565428821 |
+| 📖・como-funciona | 1570481407527227404 | 1570483252848889869 |
+| 🔗・links | 1570481409368395907 | 1570483254077952152 |
 
 Secrets in this repo: `DISCORD_WEBHOOK_BOASVINDAS`, `DISCORD_WEBHOOK_COMOFUNCIONA`, `DISCORD_WEBHOOK_LINKS`,
 `DISCORD_WEBHOOK_TESTES`.
