@@ -74,7 +74,11 @@ jobs:
           # Thumbnail: docs/icon.png on main if it exists, else the GitHub avatar
           ICON="https://raw.githubusercontent.com/$REPO/main/docs/icon.png"
           code=$(curl -s -o /dev/null -w '%{http_code}' -I "$ICON" || true)
-          [ "$code" = "200" ] || ICON="https://github.com/DredsGG.png"
+          if [ "$code" != "200" ]; then
+            # github.com/<user>.png is a redirect; Discord needs the final image URL
+            ICON=$(curl -sL -o /dev/null -w '%{url_effective}' "https://github.com/DredsGG.png?size=256" || true)
+            [ -n "$ICON" ] || ICON="https://avatars.githubusercontent.com/DredsGG?size=256"
+          fi
 
           jq -n --slurpfile r release.json \
             --arg nome "$NOME" --arg emoji "$EMOJI" --argjson cor "$COR" \
